@@ -1,0 +1,67 @@
+rules_version = '2';
+
+// SECURITY NOTE: the Firebase config (apiKey, projectId, etc.) shipped in the
+// client bundle is public by design — it only identifies the project, it is
+// not a secret. Real access control lives entirely in these rules, which run
+// on Firebase's servers and can't be bypassed by the client. Never rely on
+// hiding the config as a security measure.
+
+function isSignedIn() {
+  return request.auth != null;
+}
+
+function isOwner() {
+  return isSignedIn() &&
+    get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'owner';
+}
+
+function isRequestOwnerUser(requestData) {
+  return isSignedIn() && requestData.userId == request.auth.uid;
+}
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    match /users/{userId} {
+      // Everyone signed in can read their own profile (needed right after
+      // login to determine role) and the owner can read any profile.
+      allow read: if isSignedIn() && (request.auth.uid == userId || isOwner());
+      // Profiles are provisioned manually by the owner via the Firebase
+      // Console / Admin SDK, never written from the client app.
+      allow write: if false;
+    }
+
+    match /lessonRequests/{requestId} {
+      allow read: if isRequestOwnerUser(resource.data) || isOwner();
+
+      allow create: if isSignedIn() &&
+        request.resource.data.userId == request.auth.uid &&
+        request.resource.data.status == 'pending';
+
+      // A user may only cancel (delete) their own request while it's still
+      // pending; the owner can update status (accept/reject) on any request.
+      allow update: if isOwner() ||
+        (isRequestOwnerUser(resource.data) && resource.data.status == 'pending');
+
+      allow delete: if isOwner() ||
+        (isRequestOwnerUser(resource.data) && resource.data.status == 'pending');
+
+      match /messages/{messageId} {
+        function parentRequest() {
+          return get(/databases/$(database)/documents/lessonRequests/$(requestId)).data;
+        }
+
+        allow read: if isRequestOwnerUser(parentRequest()) || isOwner();
+
+        allow create: if (isRequestOwnerUser(parentRequest()) || isOwner()) &&
+          request.resource.data.senderId == request.auth.uid &&
+          parentRequest().status == 'pending';
+
+        allow delete: if isOwner() ||
+          (isRequestOwnerUser(parentRequest()) && parentRequest().status == 'pending');
+
+        allow update: if false;
+      }
+    }
+  }
+}
